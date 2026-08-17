@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 // Worker drives one retailer's feed: full catalog sync first (or after a
@@ -50,10 +52,12 @@ func (w *Worker) Run(ctx context.Context) {
 		switch {
 		case errors.Is(err, ErrGone):
 			log.Printf("%s: cursor expired at seq %d, full resync", w.Slug, seq)
+			metrics.IngestResyncs.WithLabelValues(w.Slug).Inc()
 			phase, catCursor, seq = "catalog", 0, 0
 			w.saveCursor(ctx, phase, catCursor, seq)
 		case err != nil:
 			log.Printf("%s: %v (backoff %s)", w.Slug, err, backoff)
+			metrics.IngestFeedErrors.WithLabelValues(w.Slug).Inc()
 			sleep(ctx, backoff)
 			backoff = min(backoff*2, time.Minute)
 		default:
@@ -67,6 +71,7 @@ func (w *Worker) catalogStep(ctx context.Context, cursor int, asOf uint64) (stri
 	if err != nil {
 		return "catalog", cursor, asOf, err
 	}
+	metrics.IngestPages.WithLabelValues(w.Slug, "catalog").Inc()
 	// The change-feed position is pinned before the first page so updates
 	// that land mid-sync get replayed, not lost. Replays are safe: the
 	// offer upsert is guarded by updated_at.
@@ -90,6 +95,7 @@ func (w *Worker) offersStep(ctx context.Context, since uint64) (uint64, bool, er
 	if err != nil {
 		return since, false, err
 	}
+	metrics.IngestPages.WithLabelValues(w.Slug, "offers").Inc()
 	if len(page.Items) == 0 {
 		return since, true, nil
 	}
@@ -126,10 +132,12 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 		accepted = append(accepted, n)
 	}
 
+	batchStart := time.Now()
 	res, err := w.Store.UpsertBatch(ctx, w.RetailerID, accepted)
 	if err != nil {
 		return fmt.Errorf("upsert: %w", err)
 	}
+	metrics.IngestBatchDuration.WithLabelValues(w.Slug).Observe(time.Since(batchStart).Seconds())
 	for _, sp := range res.Spikes {
 		raw, _ := json.Marshal(map[string]any{
 			"sku_norm": sp.Item.SKUNorm, "price_cents": sp.Item.PriceCents, "held_cents": sp.HeldCents,
@@ -140,12 +148,28 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 		return fmt.Errorf("quarantine: %w", err)
 	}
 
+	metrics.IngestItems.WithLabelValues(w.Slug, "accepted").Add(float64(len(res.Accepted)))
+	metrics.IngestItems.WithLabelValues(w.Slug, "stale_skipped").Add(float64(res.StaleSkipped))
+	if res.NoTitle > 0 {
+		metrics.IngestItems.WithLabelValues(w.Slug, "no_title").Add(float64(res.NoTitle))
+	}
+	for _, q := range quarantine {
+		metrics.IngestItems.WithLabelValues(w.Slug, q.Reason).Inc()
+	}
+
 	events := make([]PriceEvent, len(res.Accepted))
+	newest := time.Time{}
 	for i, a := range res.Accepted {
 		events[i] = PriceEvent{
 			ProductID: a.ProductID, RetailerID: w.RetailerID,
 			PriceCents: a.PriceCents, InStock: a.InStock, ObservedAt: a.UpdatedAt,
 		}
+		if a.UpdatedAt.After(newest) {
+			newest = a.UpdatedAt
+		}
+	}
+	if !newest.IsZero() {
+		metrics.IngestFreshness.WithLabelValues(w.Slug).Set(time.Since(newest).Seconds())
 	}
 	w.CH.Add(events)
 	return nil

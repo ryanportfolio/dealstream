@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 // Cache is a read-through JSON cache. Redis being down degrades to
@@ -26,9 +28,11 @@ func NewCache(rdb *redis.Client) *Cache {
 func (c *Cache) GetOrFill(ctx context.Context, key string, ttl time.Duration, fill func(context.Context) (any, error)) ([]byte, error) {
 	if data, err := c.rdb.Get(ctx, key).Bytes(); err == nil {
 		c.Hits.Add(1)
+		metrics.CacheOps.WithLabelValues("hit").Inc()
 		return data, nil
 	}
 	c.Misses.Add(1)
+	metrics.CacheOps.WithLabelValues("miss").Inc()
 
 	v, err := fill(ctx)
 	if err != nil {

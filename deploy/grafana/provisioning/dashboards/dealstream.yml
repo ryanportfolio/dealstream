@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: dealstream
+    folder: ""
+    type: file
+    options:
+      # Set DASHBOARDS_PATH to <repo>/deploy/grafana/dashboards when
+      # launching Grafana; provisioning files interpolate env vars.
+      path: ${DASHBOARDS_PATH}

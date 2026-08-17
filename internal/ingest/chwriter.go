@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 // CHWriter batches price observations for ClickHouse. ClickHouse wants few
@@ -39,6 +41,7 @@ func (w *CHWriter) Add(events []PriceEvent) {
 	w.rows = append(w.rows, events...)
 	n := len(w.rows)
 	w.mu.Unlock()
+	metrics.CHPending.Set(float64(n))
 	if n >= w.flushSize {
 		w.Flush(context.Background())
 	}
@@ -70,10 +73,16 @@ func (w *CHWriter) Flush(ctx context.Context) {
 
 	if err := w.insert(ctx, rows); err != nil {
 		log.Printf("chwriter: flush of %d rows failed, requeued: %v", len(rows), err)
+		metrics.CHFlushes.WithLabelValues("error").Inc()
 		w.mu.Lock()
 		w.rows = append(rows, w.rows...)
+		metrics.CHPending.Set(float64(len(w.rows)))
 		w.mu.Unlock()
+		return
 	}
+	metrics.CHFlushes.WithLabelValues("ok").Inc()
+	metrics.CHRowsWritten.Add(float64(len(rows)))
+	metrics.CHPending.Set(float64(w.Pending()))
 }
 
 func (w *CHWriter) insert(ctx context.Context, rows []PriceEvent) error {

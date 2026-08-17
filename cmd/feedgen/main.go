@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ryanportfolio/dealstream/internal/feedgen"
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 type cfg struct {
@@ -22,7 +23,9 @@ type cfg struct {
 func main() {
 	addr := flag.String("addr", ":8081", "listen address")
 	cfgPath := flag.String("config", "config/feedgen.json", "config file")
+	metricsAddr := flag.String("metrics", ":9103", "metrics listen address")
 	flag.Parse()
+	metrics.Serve(*metricsAddr)
 
 	data, err := os.ReadFile(*cfgPath)
 	if err != nil {

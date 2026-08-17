@@ -4,6 +4,8 @@ import (
 	"math/rand/v2"
 	"sync"
 	"time"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 // Quirks describes how a retailer's feed misbehaves. Rates are per item
@@ -104,6 +106,7 @@ func (s *Stream) Tick(n int) {
 		s.deltas[i] = cur
 		s.buf = append(s.buf, Update{Seq: s.nextSeq, Product: i, PriceCents: cur.PriceCents, InStock: cur.InStock, At: now})
 		s.nextSeq++
+		metrics.FeedUpdates.WithLabelValues(s.Cfg.Slug).Inc()
 	}
 	if len(s.buf) > maxBuffered {
 		s.buf = s.buf[len(s.buf)-maxBuffered:]

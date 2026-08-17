@@ -17,13 +17,16 @@ import (
 
 	"github.com/ryanportfolio/dealstream/internal/config"
 	"github.com/ryanportfolio/dealstream/internal/ingest"
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 func main() {
 	feedBase := flag.String("feed", "http://127.0.0.1:8081", "feedgen base URL")
 	cfgPath := flag.String("config", "config/feedgen.json", "retailer list (slugs and names)")
 	poll := flag.Duration("poll", 2*time.Second, "incremental poll interval")
+	metricsAddr := flag.String("metrics", ":9101", "metrics listen address")
 	flag.Parse()
+	metrics.Serve(*metricsAddr)
 
 	if err := config.LoadDotenv(".env"); err != nil {
 		log.Fatal(err)

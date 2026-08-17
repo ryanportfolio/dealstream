@@ -6,6 +6,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 // A deal is a price dislocation: one retailer selling well below the
@@ -55,8 +57,10 @@ func (s *Server) RefreshDealsLoop(ctx context.Context, every time.Duration) {
 		n, err := s.refreshDeals(ctx)
 		if err != nil {
 			log.Printf("deals: refresh failed: %v", err)
+			metrics.DealsRefresh.WithLabelValues("error").Observe(time.Since(start).Seconds())
 		} else {
 			log.Printf("deals: materialized %d in %s", n, time.Since(start).Round(time.Millisecond))
+			metrics.DealsRefresh.WithLabelValues("ok").Observe(time.Since(start).Seconds())
 		}
 		select {
 		case <-ctx.Done():

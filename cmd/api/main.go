@@ -17,12 +17,15 @@ import (
 
 	"github.com/ryanportfolio/dealstream/internal/api"
 	"github.com/ryanportfolio/dealstream/internal/config"
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dealsEvery := flag.Duration("deals-every", 5*time.Minute, "deals rematerialization interval")
+	metricsAddr := flag.String("metrics", ":9102", "metrics listen address")
 	flag.Parse()
+	metrics.Serve(*metricsAddr)
 
 	if err := config.LoadDotenv(".env"); err != nil {
 		log.Fatal(err)

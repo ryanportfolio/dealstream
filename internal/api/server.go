@@ -8,11 +8,14 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 type Server struct {
@@ -29,13 +32,35 @@ func NewServer(pg *pgxpool.Pool, ch driver.Conn, rdb *redis.Client) *Server {
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /search", s.handleSearch)
-	mux.HandleFunc("GET /products/{id}", s.handleProduct)
-	mux.HandleFunc("GET /products/{id}/history", s.handleHistory)
-	mux.HandleFunc("GET /deals", s.handleDeals)
-	mux.HandleFunc("GET /collections", s.handleCollections)
-	mux.HandleFunc("GET /collections/{slug}", s.handleCollection)
+	mux.HandleFunc("GET /search", instrument("search", s.handleSearch))
+	mux.HandleFunc("GET /products/{id}", instrument("product", s.handleProduct))
+	mux.HandleFunc("GET /products/{id}/history", instrument("history", s.handleHistory))
+	mux.HandleFunc("GET /products/{id}/similar", instrument("similar", s.handleSimilar))
+	mux.HandleFunc("GET /deals", instrument("deals", s.handleDeals))
+	mux.HandleFunc("GET /collections", instrument("collections", s.handleCollections))
+	mux.HandleFunc("GET /collections/{slug}", instrument("collection", s.handleCollection))
 	return mux
+}
+
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.status = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func instrument(route string, next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next(rec, r)
+		metrics.HTTPDuration.
+			WithLabelValues(route, strconv.Itoa(rec.status/100)+"xx").
+			Observe(time.Since(start).Seconds())
+	}
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {

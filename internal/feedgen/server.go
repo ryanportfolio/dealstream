@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ryanportfolio/dealstream/internal/metrics"
 )
 
 type Server struct {
@@ -24,32 +26,38 @@ func NewServer(u *Universe, streams map[string]*Stream) *Server {
 
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /r/{slug}/catalog", s.withRetailer(s.handleCatalog))
-	mux.HandleFunc("GET /r/{slug}/offers", s.withRetailer(s.handleOffers))
-	mux.HandleFunc("GET /r/{slug}/health", s.withRetailer(s.handleHealth))
+	mux.HandleFunc("GET /r/{slug}/catalog", s.withRetailer("catalog", s.handleCatalog))
+	mux.HandleFunc("GET /r/{slug}/offers", s.withRetailer("offers", s.handleOffers))
+	mux.HandleFunc("GET /r/{slug}/health", s.withRetailer("health", s.handleHealth))
 	mux.HandleFunc("POST /admin/retailers/{slug}/status", s.handleSetStatus)
 	mux.HandleFunc("GET /admin/state", s.handleState)
 	return mux
 }
 
-func (s *Server) withRetailer(next func(http.ResponseWriter, *http.Request, *Stream)) http.HandlerFunc {
+func (s *Server) withRetailer(endpoint string, next func(http.ResponseWriter, *http.Request, *Stream)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		st, ok := s.Streams[r.PathValue("slug")]
 		if !ok {
 			http.Error(w, "unknown retailer", http.StatusNotFound)
 			return
 		}
+		count := func(status int) {
+			metrics.FeedRequests.WithLabelValues(st.Cfg.Slug, endpoint, strconv.Itoa(status)).Inc()
+		}
 		switch st.Status() {
 		case "dead":
+			count(http.StatusServiceUnavailable)
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
 		case "degraded":
 			time.Sleep(time.Duration(1500+s.rng.IntN(2500)) * time.Millisecond)
 			if s.rng.Float64() < 0.10 {
+				count(http.StatusInternalServerError)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
 			}
 		}
+		count(http.StatusOK)
 		next(w, r, st)
 	}
 }
