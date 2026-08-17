@@ -169,7 +169,7 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 		}
 	}
 	if !newest.IsZero() {
-		metrics.IngestFreshness.WithLabelValues(w.Slug).Set(time.Since(newest).Seconds())
+		metrics.IngestLastAccept.WithLabelValues(w.Slug).Set(float64(newest.UnixMilli()) / 1000)
 	}
 	w.CH.Add(events)
 	return nil

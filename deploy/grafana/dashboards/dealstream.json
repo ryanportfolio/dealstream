@@ -21,7 +21,7 @@
       "datasource": { "type": "prometheus", "uid": "prom" },
       "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
       "targets": [
-        { "refId": "A", "expr": "dealstream_ingest_freshness_seconds", "legendFormat": "{{retailer}}" }
+        { "refId": "A", "expr": "time() - dealstream_ingest_last_accept_timestamp_seconds", "legendFormat": "{{retailer}}" }
       ]
     },
     {

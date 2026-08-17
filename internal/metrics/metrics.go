@@ -45,9 +45,12 @@ var (
 		Help: "Full catalog resyncs forced by an expired cursor, by retailer.",
 	}, []string{"retailer"})
 
-	IngestFreshness = promauto.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "dealstream_ingest_freshness_seconds",
-		Help: "Seconds since the newest accepted item's feed timestamp, by retailer.",
+	// Freshness is derived in PromQL as time() minus this, so a silent
+	// retailer's staleness keeps climbing. A gauge of "seconds since"
+	// would freeze at its last value exactly when the feed dies.
+	IngestLastAccept = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "dealstream_ingest_last_accept_timestamp_seconds",
+		Help: "Unix timestamp of the newest accepted item's feed timestamp, by retailer.",
 	}, []string{"retailer"})
 
 	IngestBatchDuration = promauto.NewHistogramVec(prometheus.HistogramOpts{
