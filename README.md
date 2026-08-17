@@ -15,7 +15,7 @@ The whole stack runs on Railway. The API is public, ingestion is running against
 - [/products/11508/similar](https://api-production-f55f8.up.railway.app/products/11508/similar) pgvector nearest neighbors
 - [/collections/camp-kit](https://api-production-f55f8.up.railway.app/collections/camp-kit) a rule-based collection computed from live prices
 
-It is a JSON API, not a storefront: the product is the pipeline behind it.
+In a browser these routes render a designed HTML view; curl gets JSON. Both come from the same bytes: the showcase layer runs the real handler and renders whatever JSON it produced, so the two views cannot drift apart. Add `?format=json` to any page to see the raw payload.
 
 ## The system
 

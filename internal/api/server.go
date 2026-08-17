@@ -34,17 +34,25 @@ func NewServer(pg *pgxpool.Pool, ch driver.Conn, rdb *redis.Client) *Server {
 	return &Server{PG: pg, CH: ch, Redis: rdb, Cache: NewCache(rdb)}
 }
 
+// Mux routes every read endpoint through instrument (metrics) and
+// showcase (HTML for browsers, JSON for everyone else).
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /{$}", s.handleIndex)
+	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		if wantsHTML(r) {
+			s.renderLanding(w, r)
+			return
+		}
+		s.handleIndex(w, r)
+	})
 	mux.HandleFunc("GET /healthz", s.handleHealth)
-	mux.HandleFunc("GET /search", instrument("search", s.handleSearch))
-	mux.HandleFunc("GET /products/{id}", instrument("product", s.handleProduct))
-	mux.HandleFunc("GET /products/{id}/history", instrument("history", s.handleHistory))
-	mux.HandleFunc("GET /products/{id}/similar", instrument("similar", s.handleSimilar))
-	mux.HandleFunc("GET /deals", instrument("deals", s.handleDeals))
-	mux.HandleFunc("GET /collections", instrument("collections", s.handleCollections))
-	mux.HandleFunc("GET /collections/{slug}", instrument("collection", s.handleCollection))
+	mux.HandleFunc("GET /search", s.showcase(s.renderSearch, instrument("search", s.handleSearch)))
+	mux.HandleFunc("GET /products/{id}", s.showcase(s.renderProduct, instrument("product", s.handleProduct)))
+	mux.HandleFunc("GET /products/{id}/history", s.showcase(s.renderHistory, instrument("history", s.handleHistory)))
+	mux.HandleFunc("GET /products/{id}/similar", s.showcase(s.renderSimilar, instrument("similar", s.handleSimilar)))
+	mux.HandleFunc("GET /deals", s.showcase(s.renderDeals, instrument("deals", s.handleDeals)))
+	mux.HandleFunc("GET /collections", s.showcase(s.renderCollections, instrument("collections", s.handleCollections)))
+	mux.HandleFunc("GET /collections/{slug}", s.showcase(s.renderCollection, instrument("collection", s.handleCollection)))
 	return mux
 }
 
