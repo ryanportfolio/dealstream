@@ -1,0 +1,78 @@
+{
+  "seed": 20260817,
+  "universe_size": 450000,
+  "retailers": [
+    {
+      "slug": "valuecart", "name": "ValueCart",
+      "carry_rate": 0.45, "updates_per_sec": 40, "page_size_max": 500,
+      "quirks": {
+        "price_format": "cents", "sku_style": "canonical",
+        "dupe_rate": 0.002, "bad_price_rate": 0.0005, "missing_field_rate": 0.001,
+        "wrong_currency_rate": 0.001, "stale_timestamp_rate": 0.005, "drift_rate": 0
+      }
+    },
+    {
+      "slug": "shopmax", "name": "ShopMax",
+      "carry_rate": 0.40, "updates_per_sec": 35, "page_size_max": 500,
+      "quirks": {
+        "price_format": "float", "sku_style": "lower",
+        "dupe_rate": 0.01, "bad_price_rate": 0.001, "missing_field_rate": 0.002,
+        "wrong_currency_rate": 0.004, "stale_timestamp_rate": 0.01, "drift_rate": 0.002
+      }
+    },
+    {
+      "slug": "dealfrog", "name": "DealFrog",
+      "carry_rate": 0.35, "updates_per_sec": 60, "page_size_max": 250,
+      "quirks": {
+        "price_format": "string", "sku_style": "dashed",
+        "dupe_rate": 0.02, "bad_price_rate": 0.003, "missing_field_rate": 0.005,
+        "wrong_currency_rate": 0.008, "stale_timestamp_rate": 0.02, "drift_rate": 0.01
+      }
+    },
+    {
+      "slug": "northline", "name": "Northline",
+      "carry_rate": 0.30, "updates_per_sec": 15, "page_size_max": 1000,
+      "quirks": {
+        "price_format": "cents", "sku_style": "canonical",
+        "dupe_rate": 0, "bad_price_rate": 0, "missing_field_rate": 0,
+        "wrong_currency_rate": 0, "stale_timestamp_rate": 0, "drift_rate": 0
+      }
+    },
+    {
+      "slug": "kestrelmart", "name": "KestrelMart",
+      "carry_rate": 0.28, "updates_per_sec": 25, "page_size_max": 500,
+      "quirks": {
+        "price_format": "float", "sku_style": "canonical",
+        "dupe_rate": 0.005, "bad_price_rate": 0.001, "missing_field_rate": 0.002,
+        "wrong_currency_rate": 0.002, "stale_timestamp_rate": 0.008, "drift_rate": 0.001
+      }
+    },
+    {
+      "slug": "waresdirect", "name": "WaresDirect",
+      "carry_rate": 0.25, "updates_per_sec": 20, "page_size_max": 500,
+      "quirks": {
+        "price_format": "string", "sku_style": "lower",
+        "dupe_rate": 0.008, "bad_price_rate": 0.002, "missing_field_rate": 0.003,
+        "wrong_currency_rate": 0.005, "stale_timestamp_rate": 0.015, "drift_rate": 0.004
+      }
+    },
+    {
+      "slug": "oakline", "name": "Oakline",
+      "carry_rate": 0.22, "updates_per_sec": 10, "page_size_max": 500,
+      "quirks": {
+        "price_format": "cents", "sku_style": "dashed",
+        "dupe_rate": 0.003, "bad_price_rate": 0.0005, "missing_field_rate": 0.001,
+        "wrong_currency_rate": 0.001, "stale_timestamp_rate": 0.004, "drift_rate": 0
+      }
+    },
+    {
+      "slug": "pricepoint", "name": "PricePoint",
+      "carry_rate": 0.20, "updates_per_sec": 30, "page_size_max": 250,
+      "quirks": {
+        "price_format": "float", "sku_style": "canonical",
+        "dupe_rate": 0.006, "bad_price_rate": 0.0015, "missing_field_rate": 0.002,
+        "wrong_currency_rate": 0.003, "stale_timestamp_rate": 0.01, "drift_rate": 0.002
+      }
+    }
+  ]
+}
