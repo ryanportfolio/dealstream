@@ -1,3 +1,3 @@
-module github.com/Aoh1578/dealstream
+module github.com/ryanportfolio/dealstream
 
 go 1.26.2
