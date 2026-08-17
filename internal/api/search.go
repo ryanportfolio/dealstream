@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type SearchResult struct {
@@ -15,13 +18,41 @@ type SearchResult struct {
 	OfferCount int    `json:"offer_count"`
 }
 
-// handleSearch is full-text over titles plus structured filters. Price
-// filters apply to the best in-stock offer, which is also what sorting
-// by price uses.
+// candidateCap bounds how many matched products a single search will
+// aggregate offers for. Price sorting is exact within this set. The
+// original unbounded query aggregated offers for every match; a broad
+// term matched thousands of products and one such query monopolized a
+// connection for seconds.
+const candidateCap = 1000
+
+// handleSearch is full-text over titles plus structured filters, cached
+// for 30 seconds. Price filters and sorting apply to the best in-stock
+// offer of each candidate.
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	text := strings.TrimSpace(q.Get("q"))
+	limit := clamp(q.Get("limit"), 20, 100)
+	offset := clamp(q.Get("offset"), 0, 10_000)
 
+	key := strings.Join([]string{
+		"search", text, q.Get("category"), q.Get("brand"),
+		q.Get("min_price"), q.Get("max_price"), q.Get("sort"),
+		strconv.Itoa(limit), strconv.Itoa(offset),
+	}, "\x1f")
+
+	data, err := s.Cache.GetOrFill(r.Context(), key, 30*time.Second,
+		func(ctx context.Context) (any, error) {
+			return s.runSearch(ctx, q, text, limit, offset)
+		})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "search failed")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(data)
+}
+
+func (s *Server) runSearch(ctx context.Context, q url.Values, text string, limit, offset int) (any, error) {
 	where := []string{"TRUE"}
 	args := []any{}
 	arg := func(v any) string {
@@ -47,7 +78,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		having = append(having, "min(o.price_cents) FILTER (WHERE o.in_stock) <= "+arg(v))
 	}
 
-	order := "p.id"
+	order := "id"
 	switch q.Get("sort") {
 	case "price_asc":
 		order = "best_price ASC"
@@ -55,25 +86,27 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		order = "best_price DESC"
 	}
 
-	limit := clamp(q.Get("limit"), 20, 100)
-	offset := clamp(q.Get("offset"), 0, 10_000)
-
 	sql := `
-		SELECT p.id, p.title, p.brand, p.category,
+		WITH hits AS (
+			SELECT p.id, p.title, p.brand, p.category
+			FROM products p
+			WHERE ` + strings.Join(where, " AND ") + `
+			ORDER BY p.id
+			LIMIT ` + arg(candidateCap) + `
+		)
+		SELECT h.id, h.title, h.brand, h.category,
 		       min(o.price_cents) FILTER (WHERE o.in_stock) AS best_price,
 		       count(o.*) AS offer_count
-		FROM products p
-		JOIN offers o ON o.product_id = p.id
-		WHERE ` + strings.Join(where, " AND ") + `
-		GROUP BY p.id
+		FROM hits h
+		JOIN offers o ON o.product_id = h.id
+		GROUP BY h.id, h.title, h.brand, h.category
 		HAVING ` + strings.Join(having, " AND ") + `
 		ORDER BY ` + order + `
 		LIMIT ` + arg(limit) + ` OFFSET ` + arg(offset)
 
-	rows, err := s.PG.Query(r.Context(), sql, args...)
+	rows, err := s.PG.Query(ctx, sql, args...)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "search failed")
-		return
+		return nil, err
 	}
 	defer rows.Close()
 
@@ -81,16 +114,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var sr SearchResult
 		if err := rows.Scan(&sr.ID, &sr.Title, &sr.Brand, &sr.Category, &sr.BestCents, &sr.OfferCount); err != nil {
-			writeError(w, http.StatusInternalServerError, "scan failed")
-			return
+			return nil, err
 		}
 		results = append(results, sr)
 	}
-	if rows.Err() != nil {
-		writeError(w, http.StatusInternalServerError, "search failed")
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"results": results, "limit": limit, "offset": offset})
+	return map[string]any{"results": results, "limit": limit, "offset": offset, "capped_at": candidateCap}, rows.Err()
 }
 
 func clamp(s string, def, max int) int {

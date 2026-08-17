@@ -33,7 +33,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, config.MustGet("PG_DSN"))
+	// Bounded pool: under overload the queue forms here in the app, with
+	// request timeouts, instead of as connection pressure in Postgres.
+	pgCfg, err := pgxpool.ParseConfig(config.MustGet("PG_DSN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	pgCfg.MaxConns = 16
+	pool, err := pgxpool.NewWithConfig(ctx, pgCfg)
 	if err != nil {
 		log.Fatal(err)
 	}

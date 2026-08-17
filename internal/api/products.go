@@ -139,9 +139,16 @@ func (s *Server) handleHistory(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"product_id": id, "days": days, "points": points})
 }
 
-// retailerNames is tiny and read-mostly; cached in Redis with the same
-// path every other read uses.
+// retailerNames is cached in process: eight rows that change only when a
+// retailer is onboarded do not justify a database query per history
+// request.
 func (s *Server) retailerNames(ctx context.Context) (map[int16]string, error) {
+	s.retailersMu.Lock()
+	defer s.retailersMu.Unlock()
+	if s.retailers != nil && time.Since(s.retailersAt) < 5*time.Minute {
+		return s.retailers, nil
+	}
+
 	out := map[int16]string{}
 	rows, err := s.PG.Query(ctx, `SELECT id, slug FROM retailers`)
 	if err != nil {
@@ -156,5 +163,9 @@ func (s *Server) retailerNames(ctx context.Context) (map[int16]string, error) {
 		}
 		out[id] = slug
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	s.retailers, s.retailersAt = out, time.Now()
+	return out, nil
 }

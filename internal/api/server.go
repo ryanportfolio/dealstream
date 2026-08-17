@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
@@ -23,6 +24,10 @@ type Server struct {
 	CH    driver.Conn
 	Redis *redis.Client
 	Cache *Cache
+
+	retailersMu sync.Mutex
+	retailers   map[int16]string
+	retailersAt time.Time
 }
 
 func NewServer(pg *pgxpool.Pool, ch driver.Conn, rdb *redis.Client) *Server {
