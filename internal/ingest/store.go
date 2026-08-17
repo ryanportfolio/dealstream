@@ -118,6 +118,8 @@ func (s *Store) UpsertBatch(ctx context.Context, retailerID int16, items []Norma
 		urls    []string
 		stocks  []bool
 		updated []time.Time
+		cats    []string
+		brands  []string
 	)
 	for _, r := range accepted {
 		pids = append(pids, r.pid)
@@ -125,21 +127,27 @@ func (s *Store) UpsertBatch(ctx context.Context, retailerID int16, items []Norma
 		urls = append(urls, r.it.URL)
 		stocks = append(stocks, r.it.InStock)
 		updated = append(updated, r.it.UpdatedAt)
+		cats = append(cats, r.it.Category)
+		brands = append(brands, r.it.Brand)
 		res.Accepted = append(res.Accepted, AcceptedRow{ProductID: r.pid, PriceCents: r.it.PriceCents, InStock: r.it.InStock, UpdatedAt: r.it.UpdatedAt})
 	}
 
+	// category/brand are denormalized for the collection indexes; an
+	// update that lacks them keeps what the row already has.
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO offers (product_id, retailer_id, price_cents, url, in_stock, updated_at)
-		SELECT u.pid, $1, u.price, u.url, u.stock, u.updated
-		FROM unnest($2::bigint[], $3::bigint[], $4::text[], $5::boolean[], $6::timestamptz[])
-		     AS u(pid, price, url, stock, updated)
+		INSERT INTO offers (product_id, retailer_id, price_cents, url, in_stock, updated_at, category, brand)
+		SELECT u.pid, $1, u.price, u.url, u.stock, u.updated, u.cat, u.brand
+		FROM unnest($2::bigint[], $3::bigint[], $4::text[], $5::boolean[], $6::timestamptz[], $7::text[], $8::text[])
+		     AS u(pid, price, url, stock, updated, cat, brand)
 		ON CONFLICT (product_id, retailer_id) DO UPDATE SET
 			price_cents = EXCLUDED.price_cents,
 			url         = EXCLUDED.url,
 			in_stock    = EXCLUDED.in_stock,
-			updated_at  = EXCLUDED.updated_at
+			updated_at  = EXCLUDED.updated_at,
+			category    = COALESCE(NULLIF(EXCLUDED.category, ''), offers.category),
+			brand       = COALESCE(NULLIF(EXCLUDED.brand, ''), offers.brand)
 		WHERE offers.updated_at <= EXCLUDED.updated_at`,
-		retailerID, pids, prices, urls, stocks, updated)
+		retailerID, pids, prices, urls, stocks, updated, cats, brands)
 	if err != nil {
 		return res, fmt.Errorf("upsert offers: %w", err)
 	}

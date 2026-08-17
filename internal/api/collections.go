@@ -65,6 +65,14 @@ func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+// Collection membership is computed by walking the in-stock price index
+// in ascending order and stopping early, never by aggregating the whole
+// catalog: a rule with no category filter would otherwise group offers
+// for all 400k+ products on every cold load. The first offer seen for a
+// product in price order is that product's best price.
+const collectionSize = 100
+const collectionScanCap = 2500
+
 func (s *Server) loadCollection(ctx context.Context, slug string) (any, error) {
 	var title string
 	var rules CollectionRules
@@ -74,34 +82,83 @@ func (s *Server) loadCollection(ctx context.Context, slug string) (any, error) {
 		return nil, errNotFound
 	}
 
-	minOffers := max(rules.MinOffers, 1)
-	sql := `
-		SELECT p.id, p.title, p.brand, p.category,
-		       min(o.price_cents) FILTER (WHERE o.in_stock) AS best_price,
-		       count(o.*) AS offer_count
-		FROM products p
-		JOIN offers o ON o.product_id = p.id
-		WHERE ($1 = '' OR p.category = $1)
-		  AND ($2 = '' OR p.brand = $2)
-		GROUP BY p.id
-		HAVING min(o.price_cents) FILTER (WHERE o.in_stock) IS NOT NULL
-		   AND ($3 = 0 OR min(o.price_cents) FILTER (WHERE o.in_stock) <= $3)
-		   AND count(o.*) >= $4
-		ORDER BY best_price
-		LIMIT 100`
-	rows, err := s.PG.Query(ctx, sql, rules.Category, rules.Brand, rules.MaxPriceCents, minOffers)
+	maxPrice := rules.MaxPriceCents
+	if maxPrice == 0 {
+		maxPrice = 1 << 40
+	}
+	// Filters hit the denormalized offer columns so the composite
+	// partial indexes serve the walk; products is only joined for titles.
+	rows, err := s.PG.Query(ctx, `
+		SELECT o.product_id, o.price_cents, p.title, p.brand, p.category
+		FROM offers o
+		JOIN products p ON p.id = o.product_id
+		WHERE o.in_stock AND o.price_cents <= $1
+		  AND ($2 = '' OR o.category = $2)
+		  AND ($3 = '' OR o.brand = $3)
+		ORDER BY o.price_cents
+		LIMIT $4`, maxPrice, rules.Category, rules.Brand, collectionScanCap)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	seen := map[int64]int{}
 	items := []SearchResult{}
 	for rows.Next() {
-		var sr SearchResult
-		if err := rows.Scan(&sr.ID, &sr.Title, &sr.Brand, &sr.Category, &sr.BestCents, &sr.OfferCount); err != nil {
+		var (
+			id, price int64
+			sr        SearchResult
+		)
+		if err := rows.Scan(&id, &price, &sr.Title, &sr.Brand, &sr.Category); err != nil {
 			return nil, err
 		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		if len(items) == collectionSize {
+			break
+		}
+		seen[id] = len(items)
+		sr.ID, sr.BestCents = id, &price
 		items = append(items, sr)
 	}
-	return map[string]any{"slug": slug, "title": title, "items": items}, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// One bounded query fills in offer counts for the selected products.
+	if len(items) > 0 {
+		ids := make([]int64, len(items))
+		for i, it := range items {
+			ids[i] = it.ID
+		}
+		crows, err := s.PG.Query(ctx,
+			`SELECT product_id, count(*) FROM offers WHERE product_id = ANY($1) GROUP BY product_id`, ids)
+		if err != nil {
+			return nil, err
+		}
+		defer crows.Close()
+		for crows.Next() {
+			var id int64
+			var n int
+			if err := crows.Scan(&id, &n); err != nil {
+				return nil, err
+			}
+			items[seen[id]].OfferCount = n
+		}
+		if err := crows.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	if rules.MinOffers > 1 {
+		kept := items[:0]
+		for _, it := range items {
+			if it.OfferCount >= rules.MinOffers {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
+	}
+	return map[string]any{"slug": slug, "title": title, "items": items}, nil
 }
