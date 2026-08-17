@@ -1,6 +1,6 @@
 # dealstream
 
-A deals-catalog backend built to be operated, not just shipped. Go services ingest eight simulated retailer feeds into Postgres, Redis, and ClickHouse, serve search, collections, price history, and similar-item recommendations, and report their own health through Prometheus and Grafana. Everything below that reads like a measurement is one, taken against the live system.
+A deals-catalog backend built to be operated. Go services ingest eight simulated retailer feeds into Postgres, Redis, and ClickHouse, serve search, collections, price history, and similar-item recommendations, and report their own health through Prometheus and Grafana. Everything below that reads like a measurement is one, taken against the live system.
 
 Built as a portfolio piece: the job it mirrors runs tens of millions of prices across Postgres, Redis, ClickHouse, and Milvus. This repo scales the same shape down to a small cloud footprint and keeps the operational habits that matter at the real size.
 
@@ -39,7 +39,7 @@ From the seed run and the live system:
 - The product count is itself a check: with each retailer carrying a fixed share of a 450,000-product universe, the expected number of products no retailer carries is ~5%, predicting ~427,000 products. The pipeline landed within 500 of it.
 - 4,547 items quarantined during the seed with per-reason counts (`unsupported_currency` 3,417, `price_out_of_range` 1,108, `price_spike` 22), every raw payload kept and replayable
 - 427,001 products embedded in under 2 minutes; the IVFFlat index built in 42 seconds
-- ClickHouse holds every accepted observation (1.5M and growing at ~150 rows/s at steady state) yet history queries stay flat, because charts read the daily rollup
+- ClickHouse holds every accepted observation (8M+ rows on day one, since every full resync re-observes the whole catalog; ~150 rows/s at steady state) yet history queries stay flat, because charts read the daily rollup
 
 ## Validation policy
 
