@@ -108,6 +108,21 @@ func TestStreamCursorExpiry(t *testing.T) {
 	}
 }
 
+func TestStreamCursorAheadOfHead(t *testing.T) {
+	// A consumer whose cursor outruns the stream (feedgen restarted and
+	// reset its sequence) must be told to resync, not left polling empty
+	// pages forever.
+	u := testUniverse()
+	st := NewStream(u, RetailerCfg{Slug: "testmart", CarryRate: 0.5})
+	st.Tick(10)
+	if _, gone := st.Since(121905, 10); !gone {
+		t.Fatal("cursor ahead of head not reported gone")
+	}
+	if _, gone := st.Since(10, 10); gone {
+		t.Fatal("head cursor reported gone")
+	}
+}
+
 func TestMangleSKUNormalizesBack(t *testing.T) {
 	// Every mangled variant must normalize to the same canonical key the
 	// ingester derives, or dedupe cannot work.

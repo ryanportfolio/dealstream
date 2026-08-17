@@ -133,11 +133,15 @@ func (s *Stream) Current(i int) offerState {
 	return offerState{PriceCents: s.u.RetailerBaseCents(i, s.Cfg.Slug), InStock: s.u.Product(i).InStock}
 }
 
-// Since returns up to limit updates with Seq > since. gone reports that
-// the cursor has aged out of the buffer.
+// Since returns up to limit updates with Seq > since. gone reports an
+// unusable cursor: aged out of the buffer, or ahead of the head (the feed
+// restarted and reset its sequence) — both require a full resync.
 func (s *Stream) Since(since uint64, limit int) (out []Update, gone bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if since > s.nextSeq-1 {
+		return nil, true
+	}
 	if len(s.buf) > 0 && since+1 < s.buf[0].Seq {
 		return nil, true
 	}
