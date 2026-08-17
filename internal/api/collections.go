@@ -22,7 +22,7 @@ type CollectionSummary struct {
 }
 
 func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
-	data, err := s.Cache.GetOrFill(r.Context(), "collections:index", time.Minute,
+	data, err := s.Cache.GetOrFill(r.Context(), "collections:index", 5*time.Minute,
 		func(ctx context.Context) (any, error) {
 			rows, err := s.PG.Query(ctx, `SELECT slug, title FROM collections ORDER BY slug`)
 			if err != nil {
@@ -49,7 +49,9 @@ func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCollection(w http.ResponseWriter, r *http.Request) {
 	slug := r.PathValue("slug")
-	data, err := s.Cache.GetOrFill(r.Context(), "collection:"+slug, time.Minute,
+	// Rules change on deploy, prices drift by the minute; five minutes of
+	// staleness is a fair trade for absorbing the cold-load cost.
+	data, err := s.Cache.GetOrFill(r.Context(), "collection:"+slug, 5*time.Minute,
 		func(ctx context.Context) (any, error) {
 			return s.loadCollection(ctx, slug)
 		})

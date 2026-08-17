@@ -7,6 +7,10 @@ import { Trend } from "k6/metrics";
 
 const API = __ENV.API || "http://127.0.0.1:8080";
 
+// Random product ids hit gaps on purpose; a 404 is correct behavior, so
+// only 5xx and network errors count as failures.
+http.setResponseCallback(http.expectedStatuses({ min: 200, max: 404 }));
+
 export const options = {
   vus: Number(__ENV.VUS || 30),
   duration: __ENV.DURATION || "5m",
