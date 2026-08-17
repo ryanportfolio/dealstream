@@ -69,7 +69,8 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, st *Strea
 		cur := st.Current(i)
 		items = s.appendItem(items, st, i, cur.PriceCents, cur.InStock, time.Now().UTC())
 	}
-	resp := map[string]any{"items": items}
+	seq, _, _ := st.Stats()
+	resp := map[string]any{"items": items, "as_of_seq": seq}
 	if i < s.U.Size {
 		resp["next_cursor"] = i
 	}
