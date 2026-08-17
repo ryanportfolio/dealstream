@@ -36,6 +36,7 @@ func NewServer(pg *pgxpool.Pool, ch driver.Conn, rdb *redis.Client) *Server {
 
 func (s *Server) Mux() *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /{$}", s.handleIndex)
 	mux.HandleFunc("GET /healthz", s.handleHealth)
 	mux.HandleFunc("GET /search", instrument("search", s.handleSearch))
 	mux.HandleFunc("GET /products/{id}", instrument("product", s.handleProduct))
@@ -66,6 +67,25 @@ func instrument(route string, next http.HandlerFunc) http.HandlerFunc {
 			WithLabelValues(route, strconv.Itoa(rec.status/100)+"xx").
 			Observe(time.Since(start).Seconds())
 	}
+}
+
+// handleIndex makes the bare domain useful: a JSON map of the API for
+// anyone who lands on the root instead of a README link.
+func (s *Server) handleIndex(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": "dealstream",
+		"source":  "https://github.com/ryanportfolio/dealstream",
+		"endpoints": []string{
+			"/deals?limit=50",
+			"/search?q=drill&sort=price_asc&limit=20",
+			"/products/{id}",
+			"/products/{id}/history?days=30",
+			"/products/{id}/similar",
+			"/collections",
+			"/collections/{slug}",
+			"/healthz",
+		},
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
