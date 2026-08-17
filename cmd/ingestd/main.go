@@ -21,7 +21,7 @@ import (
 )
 
 func main() {
-	feedBase := flag.String("feed", "http://127.0.0.1:8081", "feedgen base URL")
+	feedBase := flag.String("feed", config.GetDefault("FEED_BASE", "http://127.0.0.1:8081"), "feedgen base URL")
 	cfgPath := flag.String("config", "config/feedgen.json", "retailer list (slugs and names)")
 	poll := flag.Duration("poll", 2*time.Second, "incremental poll interval")
 	metricsAddr := flag.String("metrics", ":9101", "metrics listen address")

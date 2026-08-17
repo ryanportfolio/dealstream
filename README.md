@@ -2,7 +2,20 @@
 
 A deals-catalog backend built to be operated, not just shipped. Go services ingest eight simulated retailer feeds into Postgres, Redis, and ClickHouse, serve search, collections, price history, and similar-item recommendations, and report their own health through Prometheus and Grafana. Everything below that reads like a measurement is one, taken against the live system.
 
-Built as a portfolio piece: the job it mirrors runs tens of millions of prices across Postgres, Redis, ClickHouse, and Milvus. This repo scales the same shape down to one machine and a small cloud footprint, and keeps the operational habits that matter at the real size.
+Built as a portfolio piece: the job it mirrors runs tens of millions of prices across Postgres, Redis, ClickHouse, and Milvus. This repo scales the same shape down to a small cloud footprint and keeps the operational habits that matter at the real size.
+
+## Try it live
+
+The whole stack runs on Railway. The API is public, ingestion is running against it right now, and the catalog below it holds 1.1M offers:
+
+- [/deals](https://api-production-f55f8.up.railway.app/deals) current cross-retailer price dislocations
+- [/search?q=drill&sort=price_asc](https://api-production-f55f8.up.railway.app/search?q=drill&sort=price_asc) full-text search, price-sorted
+- [/products/11508](https://api-production-f55f8.up.railway.app/products/11508) one product with all its offers
+- [/products/11508/history](https://api-production-f55f8.up.railway.app/products/11508/history) daily price history from the ClickHouse rollup
+- [/products/11508/similar](https://api-production-f55f8.up.railway.app/products/11508/similar) pgvector nearest neighbors
+- [/collections/camp-kit](https://api-production-f55f8.up.railway.app/collections/camp-kit) a rule-based collection computed from live prices
+
+It is a JSON API, not a storefront: the product is the pipeline behind it.
 
 ## The system
 
@@ -98,7 +111,7 @@ The dashboard also shows what load costs the write side: during each k6 run, ing
 - **pgvector instead of Milvus.** At 427k vectors, Postgres with an IVFFlat index answers in milliseconds and removes an entire service from the operational surface. At tens of millions of vectors with heavy write churn, a dedicated vector store earns its keep; the recommendation query is isolated behind one function so the swap is contained.
 - **Attribute-hash embeddings instead of a learned model.** Feature hashing over category, brand, and title tokens is deterministic, explainable, and free. The play here is the retrieval plumbing; a model upgrade changes one package.
 - **Axiom is absent.** Structured logs go to stdout; the log-aggregation seat in this setup is empty. Prometheus and Grafana carry the observability story.
-- **Everything runs against a small Railway project** (Postgres with pgvector, Redis, ClickHouse) with the Go services local. The seed and load numbers include real network round trips, not localhost flattery.
+- **Everything runs on a small Railway project**: Postgres with pgvector, Redis, ClickHouse, and the three Go services (Dockerfiles in `deploy/`). The seed and load numbers were measured with the services running on a dev machine against the same Railway databases, so they include real network round trips, not localhost flattery.
 
 ## Running it
 

@@ -44,3 +44,20 @@ func MustGet(key string) string {
 	}
 	return v
 }
+
+// GetDefault returns the env value of key, or def when unset.
+func GetDefault(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// ListenAddr returns ":$PORT" when PORT is set (hosting platforms inject
+// it), otherwise def. Flag values still win over both.
+func ListenAddr(def string) string {
+	if p := os.Getenv("PORT"); p != "" {
+		return ":" + p
+	}
+	return def
+}
