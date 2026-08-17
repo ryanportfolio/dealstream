@@ -33,7 +33,7 @@ From the seed run and the live system:
 Strict on values, lenient on presentation. SKU formatting differences and price wire formats are normalized silently; those are presentation. Values that cannot be trusted are quarantined with a reason, kept, and counted as a first-class metric:
 
 - Absolute price bounds catch the ×100 unit bug for anything from $20 up
-- A relative check catches it below that: an update 20× away from the price already held is a spike, not a deal
+- A relative check catches it below that: an update 20× away from the price already held is a spike, not a deal. The check self-heals: if a "spike" persists across three consecutive observations, it is accepted as the truth, so one corrupt first observation cannot wedge an offer against every later correction
 - Non-USD currencies are rejected by policy rather than guessed at
 - Timestamps from the future are rejected; stale ones are accepted and handled by a last-write-wins guard on the offer row, so out-of-order updates cannot regress a price
 
@@ -47,6 +47,19 @@ These are kept in the commit history on purpose.
 2. **Feed sequence reset.** Restarting feedgen reset its update sequences, and consumers whose cursors were now ahead of the feed polled empty pages forever, looking perfectly healthy. The feed now answers 410 to a cursor from the future, and the worker resyncs. Verified live: one restart sent all eight workers through the resync path.
 3. **ClickHouse under memory pressure.** Lowering the container's memory cap mid-run got ClickHouse OOM-killed repeatedly; every flush during the outages failed with connection errors. The buffered writer requeues failed batches, so when the cap was raised, every row landed. Count checked out afterward: nothing lost.
 4. **A frozen freshness gauge.** Freshness was first exported as "seconds since last accepted item", set when items arrived. Killing a retailer in a chaos run exposed the flaw: the gauge froze at its last healthy value precisely when it should have been climbing. It is now exported as a last-accept timestamp and derived in PromQL as `time()` minus that, so a silent feed's staleness rises on its own ([the chaos capture](docs/img/dashboard-chaos-oakline.png) shows one retailer climbing past 5 minutes while seven sit at zero).
+
+## The review round
+
+Before publishing, the whole repo went through an adversarial multi-agent code review: eight reviewers hunting from different angles, every candidate finding verified by a separate agent told to refute it. Seventeen real defects survived verification, all in the resilience paths that only fire under failure. The instructive ones:
+
+- **The spike check could wedge an offer forever.** A corrupt first observation became the held price, and every honest correction afterward looked 20× away from it and got rejected. Fixed with the persistence rule above.
+- **The feed cursor could outrun the history store.** The cursor was saved after the Postgres write but before the buffered ClickHouse flush, so a crash in that window lost observations the cursor claimed were done. Workers now wait on a flush watermark before saving; the writer groups their waits into one insert, and a crash replays a page instead of losing it (replays are safe on both stores).
+- **"Drained" was guessed from page size.** A worker compared items received against the page size it asked for, but two retailers clamp pages lower, so those feeds read as permanently drained and were polled at idle speed while backlogged. The feed now says `has_more` itself.
+- **A feed restart could silently alias cursors.** Sequences reset on restart, and an old cursor number can look valid in the new sequence space. Every response now carries the feed instance's epoch, and a mismatch forces a resync instead of quietly serving the wrong window.
+- **Database outages read as 404s.** Handlers mapped every lookup error to "not found", so a Postgres outage would have looked like an empty catalog to clients. Missing rows and failures now split into 404 and 500.
+- **The ClickHouse buffer had no ceiling.** A long outage grew the requeue without bound. It is now capped; past the cap the oldest rows drop and a counter says exactly how many, because bounded memory with an honest metric beats an eventual OOM.
+
+The rest of the batch: search's candidate cap kept the lowest product ids instead of the best-ranked matches (and the response now flags truncation), cache misses stampeded Postgres without request coalescing, quarantined spikes stored a summary instead of the replayable raw payload, and a handful of smaller ones in the same spirit. Every fix landed with the review's failure scenario as its test where one was cheap to write.
 
 ## Observability
 
@@ -74,7 +87,7 @@ k6 runs a browse mix (`scripts/load.js`): search, product detail, history, simil
 | p95 | 36.6 s | 3.3 s |
 | failed requests | 6.3% | 0% |
 
-1. **Run 1: everything except `/deals` drowned.** The Redis-served route held 17 ms medians while every Postgres route sat at 8 to 21 seconds. That split identified the bottleneck before any profiling: queries, not network, not Go. Search aggregated offers for every full-text match, so one broad term held a connection for seconds and everything queued behind it. Fixes: search aggregates at most 1,000 candidates and caches results for 30 s, retailer names moved to an in-process cache, and the connection pool got an explicit cap so the queue forms in the app instead of inside Postgres.
+1. **Run 1: everything except `/deals` drowned.** The Redis-served route held 17 ms medians while every Postgres route sat at 8 to 21 seconds. That split identified the bottleneck before any profiling: queries, not network, not Go. Search aggregated offers for every full-text match, so one broad term held a connection for seconds and everything queued behind it. Fixes: search aggregates at most 1,000 candidates (the best-ranked matches, with truncation flagged in the response) and caches results for 30 s, retailer names moved to an in-process cache, and the connection pool got an explicit cap so the queue forms in the app instead of inside Postgres.
 2. **Run 2: history fell from 7.3 s to 37 ms, and the next whale surfaced.** Collections with no category filter aggregated the entire catalog per cold load; p90 hit the 60-second timeout. `EXPLAIN (ANALYZE, BUFFERS)` showed the category variant probing 222,784 product rows to find 2,500 matches, because category lived on `products` while price lived on `offers`. Fix: category and brand are denormalized onto offers at write time with composite partial indexes, and the collection query walks `(category, price_cents)` in order and stops early. Cold collection loads went from 16 to 60 s down to under 2 s.
 3. **Run 3 is the table above.** The remaining p95 tail is cold search variants doing full-text scans on a 1 vCPU Postgres across a real network hop, with ingestion writing concurrently. On this hardware that tail is a fact, and the dashboard makes it visible rather than hiding it.
 

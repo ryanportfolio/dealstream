@@ -35,7 +35,7 @@ func (s *Server) handleDeals(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, "deals not materialized yet")
 		return
 	}
-	s.Cache.Hits.Add(1)
+	metrics.CacheOps.WithLabelValues("hit").Inc()
 
 	var deals []Deal
 	if err := json.Unmarshal(data, &deals); err != nil {

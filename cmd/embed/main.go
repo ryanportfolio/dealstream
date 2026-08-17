@@ -28,7 +28,14 @@ func main() {
 		log.Fatal(err)
 	}
 	ctx := context.Background()
-	pool, err := pgxpool.New(ctx, config.MustGet("PG_DSN"))
+	// The backfill is one query at a time; a small cap keeps a stray run
+	// from holding connections the live services need.
+	pcfg, err := pgxpool.ParseConfig(config.MustGet("PG_DSN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	pcfg.MaxConns = 4
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		log.Fatal(err)
 	}

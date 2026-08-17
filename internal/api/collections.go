@@ -2,8 +2,11 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // Collections are rule-based: a jsonb rule row filters the live catalog,
@@ -22,7 +25,10 @@ type CollectionSummary struct {
 }
 
 func (s *Server) handleCollections(w http.ResponseWriter, r *http.Request) {
-	data, err := s.Cache.GetOrFill(r.Context(), "collections:index", 5*time.Minute,
+	// No colon in this key: item keys below are "collection:<slug>" with
+	// a caller-supplied slug, so the index key stays out of any prefix a
+	// slug could ever be spliced into.
+	data, err := s.Cache.GetOrFill(r.Context(), "collections-index", 5*time.Minute,
 		func(ctx context.Context) (any, error) {
 			rows, err := s.PG.Query(ctx, `SELECT slug, title FROM collections ORDER BY slug`)
 			if err != nil {
@@ -80,8 +86,13 @@ func (s *Server) loadCollection(ctx context.Context, slug string) (any, error) {
 	var rules CollectionRules
 	err := s.PG.QueryRow(ctx,
 		`SELECT title, rules FROM collections WHERE slug = $1`, slug).Scan(&title, &rules)
-	if err != nil {
+	// Missing row is a 404; any other failure is a 500, not an empty
+	// catalog.
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	maxPrice := rules.MaxPriceCents
@@ -104,6 +115,14 @@ func (s *Server) loadCollection(ctx context.Context, slug string) (any, error) {
 	}
 	defer rows.Close()
 
+	// A min_offers rule filters on counts fetched after the walk, so the
+	// walk must keep every candidate in the scan window: stopping at
+	// collectionSize first would under-fill the page whenever the filter
+	// rejects some of the earliest hits.
+	target := collectionSize
+	if rules.MinOffers > 1 {
+		target = collectionScanCap
+	}
 	seen := map[int64]int{}
 	items := []SearchResult{}
 	for rows.Next() {
@@ -117,7 +136,7 @@ func (s *Server) loadCollection(ctx context.Context, slug string) (any, error) {
 		if _, ok := seen[id]; ok {
 			continue
 		}
-		if len(items) == collectionSize {
+		if len(items) == target {
 			break
 		}
 		seen[id] = len(items)
@@ -161,6 +180,9 @@ func (s *Server) loadCollection(ctx context.Context, slug string) (any, error) {
 			}
 		}
 		items = kept
+	}
+	if len(items) > collectionSize {
+		items = items[:collectionSize]
 	}
 	return map[string]any{"slug": slug, "title": title, "items": items}, nil
 }

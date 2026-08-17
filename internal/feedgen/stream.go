@@ -135,18 +135,20 @@ func (s *Stream) Current(i int) offerState {
 
 // Since returns up to limit updates with Seq > since. gone reports an
 // unusable cursor: aged out of the buffer, or ahead of the head (the feed
-// restarted and reset its sequence) — both require a full resync.
-func (s *Stream) Since(since uint64, limit int) (out []Update, gone bool) {
+// restarted and reset its sequence) — both require a full resync. hasMore
+// reports whether updates beyond the returned window remain, so consumers
+// know to keep paging instead of guessing from the page size.
+func (s *Stream) Since(since uint64, limit int) (out []Update, hasMore, gone bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if since > s.nextSeq-1 {
-		return nil, true
+		return nil, false, true
 	}
 	if len(s.buf) > 0 && since+1 < s.buf[0].Seq {
-		return nil, true
+		return nil, false, true
 	}
 	if len(s.buf) == 0 && since+1 < s.nextSeq {
-		return nil, true
+		return nil, false, true
 	}
 	// Binary search would do; linear from the back is fine at this size.
 	start := len(s.buf)
@@ -154,7 +156,7 @@ func (s *Stream) Since(since uint64, limit int) (out []Update, gone bool) {
 		start--
 	}
 	end := min(start+limit, len(s.buf))
-	return append([]Update(nil), s.buf[start:end]...), false
+	return append([]Update(nil), s.buf[start:end]...), end < len(s.buf), false
 }
 
 func (s *Stream) Status() string {

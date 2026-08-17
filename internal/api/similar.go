@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // handleSimilar is a pgvector KNN over attribute-hash embeddings: cheap,
@@ -34,9 +37,18 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) loadSimilar(ctx context.Context, id int64) (any, error) {
-	var exists bool
-	if err := s.PG.QueryRow(ctx,
-		`SELECT embedding IS NOT NULL FROM products WHERE id = $1`, id).Scan(&exists); err != nil || !exists {
+	var embedded bool
+	err := s.PG.QueryRow(ctx,
+		`SELECT embedding IS NOT NULL FROM products WHERE id = $1`, id).Scan(&embedded)
+	// Missing row or missing embedding is a 404; anything else (database
+	// down, timeout) is a 500, not an empty catalog.
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !embedded {
 		return nil, errNotFound
 	}
 

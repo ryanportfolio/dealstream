@@ -26,35 +26,48 @@ type Worker struct {
 	Poll       time.Duration
 }
 
-// Cursor encoding: "catalog:<index>:<asOfSeq>" during sync,
-// "offers:<seq>" once incremental.
+// cursorState is the worker's persisted position. epoch is the feed
+// instance the position belongs to: a feed restart resets sequences, and
+// an old seq can alias into the new sequence space while looking valid.
+// During catalog sync, seq holds the pinned change-feed position;
+// incremental, it is the last applied update seq.
+type cursorState struct {
+	phase     string // "catalog" | "offers"
+	epoch     uint64
+	catCursor int
+	seq       uint64
+}
+
+// Cursor encoding: "catalog:<epoch>:<index>:<asOfSeq>" during sync,
+// "offers:<epoch>:<seq>" once incremental. Anything else (including
+// pre-epoch cursors) starts a fresh catalog sync.
 func (w *Worker) Run(ctx context.Context) {
 	cur, err := w.Store.LoadCursor(ctx, w.RetailerID)
 	if err != nil {
 		log.Printf("%s: load cursor: %v", w.Slug, err)
 	}
-	phase, catCursor, seq := parseCursor(cur)
-	log.Printf("%s: starting phase=%s catalog=%d seq=%d", w.Slug, phase, catCursor, seq)
+	cs := parseCursor(cur)
+	log.Printf("%s: starting phase=%s epoch=%d catalog=%d seq=%d", w.Slug, cs.phase, cs.epoch, cs.catCursor, cs.seq)
 
 	backoff := time.Second
 	for ctx.Err() == nil {
 		var err error
-		switch phase {
+		switch cs.phase {
 		case "catalog":
-			phase, catCursor, seq, err = w.catalogStep(ctx, catCursor, seq)
+			err = w.catalogStep(ctx, &cs)
 		default:
 			var idle bool
-			seq, idle, err = w.offersStep(ctx, seq)
+			idle, err = w.offersStep(ctx, &cs)
 			if err == nil && idle {
 				sleep(ctx, w.Poll)
 			}
 		}
 		switch {
 		case errors.Is(err, ErrGone):
-			log.Printf("%s: cursor expired at seq %d, full resync", w.Slug, seq)
+			log.Printf("%s: cursor unusable at seq %d (expired or feed restarted), full resync", w.Slug, cs.seq)
 			metrics.IngestResyncs.WithLabelValues(w.Slug).Inc()
-			phase, catCursor, seq = "catalog", 0, 0
-			w.saveCursor(ctx, phase, catCursor, seq)
+			cs = cursorState{phase: "catalog"}
+			w.saveCursor(ctx, cs)
 		case err != nil:
 			log.Printf("%s: %v (backoff %s)", w.Slug, err, backoff)
 			metrics.IngestFeedErrors.WithLabelValues(w.Slug).Inc()
@@ -66,45 +79,55 @@ func (w *Worker) Run(ctx context.Context) {
 	}
 }
 
-func (w *Worker) catalogStep(ctx context.Context, cursor int, asOf uint64) (string, int, uint64, error) {
-	page, err := w.Client.Catalog(ctx, w.Slug, cursor, w.PageSize)
+func (w *Worker) catalogStep(ctx context.Context, cs *cursorState) error {
+	page, err := w.Client.Catalog(ctx, w.Slug, cs.catCursor, w.PageSize)
 	if err != nil {
-		return "catalog", cursor, asOf, err
+		return err
 	}
 	metrics.IngestPages.WithLabelValues(w.Slug, "catalog").Inc()
-	// The change-feed position is pinned before the first page so updates
-	// that land mid-sync get replayed, not lost. Replays are safe: the
-	// offer upsert is guarded by updated_at.
-	if asOf == 0 {
-		asOf = page.AsOfSeq
+	// The epoch and change-feed position are pinned on the first page so
+	// updates that land mid-sync get replayed, not lost. Pinning keys off
+	// the page position, not a zero sentinel: as_of_seq is legitimately 0
+	// on a feed that has emitted no updates yet.
+	if cs.catCursor == 0 {
+		cs.epoch = page.Epoch
+		cs.seq = page.AsOfSeq
+	} else if page.Epoch != cs.epoch {
+		return ErrGone // feed restarted mid-sync; positions no longer comparable
 	}
 	if err := w.processItems(ctx, page.Items); err != nil {
-		return "catalog", cursor, asOf, err
+		return err
 	}
 	if page.NextCursor == nil {
-		log.Printf("%s: catalog sync complete, switching to incremental at seq %d", w.Slug, asOf)
-		w.saveCursor(ctx, "offers", 0, asOf)
-		return "offers", 0, asOf, nil
+		log.Printf("%s: catalog sync complete, switching to incremental at seq %d", w.Slug, cs.seq)
+		cs.phase, cs.catCursor = "offers", 0
+	} else {
+		cs.catCursor = *page.NextCursor
 	}
-	w.saveCursor(ctx, "catalog", *page.NextCursor, asOf)
-	return "catalog", *page.NextCursor, asOf, nil
+	w.saveCursor(ctx, *cs)
+	return nil
 }
 
-func (w *Worker) offersStep(ctx context.Context, since uint64) (uint64, bool, error) {
-	page, err := w.Client.Offers(ctx, w.Slug, since, w.PageSize)
+func (w *Worker) offersStep(ctx context.Context, cs *cursorState) (idle bool, err error) {
+	page, err := w.Client.Offers(ctx, w.Slug, cs.seq, w.PageSize)
 	if err != nil {
-		return since, false, err
+		return false, err
 	}
 	metrics.IngestPages.WithLabelValues(w.Slug, "offers").Inc()
+	if page.Epoch != cs.epoch {
+		return false, ErrGone // feed restarted; our seq may alias into its new sequence space
+	}
 	if len(page.Items) == 0 {
-		return since, true, nil
+		return true, nil
 	}
 	if err := w.processItems(ctx, page.Items); err != nil {
-		return since, false, err
+		return false, err
 	}
-	w.saveCursor(ctx, "offers", 0, page.Next)
-	// A short page means the feed is drained for now.
-	return page.Next, len(page.Items) < w.PageSize, nil
+	cs.seq = page.Next
+	w.saveCursor(ctx, *cs)
+	// The feed says whether more updates are waiting; guessing from the
+	// page size breaks when the server clamps the requested limit.
+	return !page.HasMore, nil
 }
 
 func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error {
@@ -129,6 +152,7 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 			quarantine = append(quarantine, QuarantineRow{Reason: reason, Raw: rawJSON})
 			continue
 		}
+		n.Raw = rawJSON
 		accepted = append(accepted, n)
 	}
 
@@ -139,10 +163,10 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 	}
 	metrics.IngestBatchDuration.WithLabelValues(w.Slug).Observe(time.Since(batchStart).Seconds())
 	for _, sp := range res.Spikes {
-		raw, _ := json.Marshal(map[string]any{
-			"sku_norm": sp.Item.SKUNorm, "price_cents": sp.Item.PriceCents, "held_cents": sp.HeldCents,
-		})
-		quarantine = append(quarantine, QuarantineRow{Reason: "price_spike", Raw: raw})
+		quarantine = append(quarantine, QuarantineRow{Reason: "price_spike", Raw: sp.Item.Raw})
+	}
+	for _, it := range res.NoTitle {
+		quarantine = append(quarantine, QuarantineRow{Reason: "no_title", Raw: it.Raw})
 	}
 	if err := w.Store.Quarantine(ctx, w.RetailerID, quarantine); err != nil {
 		return fmt.Errorf("quarantine: %w", err)
@@ -150,8 +174,8 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 
 	metrics.IngestItems.WithLabelValues(w.Slug, "accepted").Add(float64(len(res.Accepted)))
 	metrics.IngestItems.WithLabelValues(w.Slug, "stale_skipped").Add(float64(res.StaleSkipped))
-	if res.NoTitle > 0 {
-		metrics.IngestItems.WithLabelValues(w.Slug, "no_title").Add(float64(res.NoTitle))
+	if res.SpikeOverrides > 0 {
+		metrics.IngestItems.WithLabelValues(w.Slug, "spike_overridden").Add(float64(res.SpikeOverrides))
 	}
 	for _, q := range quarantine {
 		metrics.IngestItems.WithLabelValues(w.Slug, q.Reason).Inc()
@@ -171,34 +195,44 @@ func (w *Worker) processItems(ctx context.Context, raws []json.RawMessage) error
 	if !newest.IsZero() {
 		metrics.IngestLastAccept.WithLabelValues(w.Slug).Set(float64(newest.UnixMilli()) / 1000)
 	}
-	w.CH.Add(events)
-	return nil
+	if len(events) == 0 {
+		return nil
+	}
+	// The cursor must not advance past observations ClickHouse has not
+	// durably taken: wait for this batch's watermark before the caller
+	// saves. A crash then replays the page, and replays are safe on both
+	// sides (offers are guarded by updated_at, the rollup's aggregates
+	// are duplicate-insensitive).
+	wm := w.CH.Add(events)
+	return w.CH.WaitFlushed(ctx, wm)
 }
 
-func (w *Worker) saveCursor(ctx context.Context, phase string, catCursor int, seq uint64) {
+func (w *Worker) saveCursor(ctx context.Context, cs cursorState) {
 	var cur string
-	if phase == "catalog" {
-		cur = fmt.Sprintf("catalog:%d:%d", catCursor, seq)
+	if cs.phase == "catalog" {
+		cur = fmt.Sprintf("catalog:%d:%d:%d", cs.epoch, cs.catCursor, cs.seq)
 	} else {
-		cur = fmt.Sprintf("offers:%d", seq)
+		cur = fmt.Sprintf("offers:%d:%d", cs.epoch, cs.seq)
 	}
 	if err := w.Store.SaveCursor(ctx, w.RetailerID, cur); err != nil {
 		log.Printf("%s: save cursor: %v", w.Slug, err)
 	}
 }
 
-func parseCursor(cur string) (phase string, catCursor int, seq uint64) {
+func parseCursor(cur string) cursorState {
 	parts := strings.Split(cur, ":")
 	switch {
-	case len(parts) == 3 && parts[0] == "catalog":
-		catCursor, _ = strconv.Atoi(parts[1])
-		seq, _ = strconv.ParseUint(parts[2], 10, 64)
-		return "catalog", catCursor, seq
-	case len(parts) == 2 && parts[0] == "offers":
-		seq, _ = strconv.ParseUint(parts[1], 10, 64)
-		return "offers", 0, seq
+	case len(parts) == 4 && parts[0] == "catalog":
+		epoch, _ := strconv.ParseUint(parts[1], 10, 64)
+		catCursor, _ := strconv.Atoi(parts[2])
+		seq, _ := strconv.ParseUint(parts[3], 10, 64)
+		return cursorState{phase: "catalog", epoch: epoch, catCursor: catCursor, seq: seq}
+	case len(parts) == 3 && parts[0] == "offers":
+		epoch, _ := strconv.ParseUint(parts[1], 10, 64)
+		seq, _ := strconv.ParseUint(parts[2], 10, 64)
+		return cursorState{phase: "offers", epoch: epoch, seq: seq}
 	default:
-		return "catalog", 0, 0
+		return cursorState{phase: "catalog"}
 	}
 }
 

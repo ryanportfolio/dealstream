@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -19,10 +21,11 @@ type SearchResult struct {
 }
 
 // candidateCap bounds how many matched products a single search will
-// aggregate offers for. Price sorting is exact within this set. The
-// original unbounded query aggregated offers for every match; a broad
-// term matched thousands of products and one such query monopolized a
-// connection for seconds.
+// aggregate offers for. The original unbounded query aggregated offers
+// for every match; a broad term matched thousands of products and one
+// such query monopolized a connection for seconds. Candidates are the
+// best-ranked matches, price sorting is exact within them, and the
+// response says when the cap truncated the match set.
 const candidateCap = 1000
 
 // handleSearch is full-text over titles plus structured filters, cached
@@ -34,11 +37,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	limit := clamp(q.Get("limit"), 20, 100)
 	offset := clamp(q.Get("offset"), 0, 10_000)
 
-	key := strings.Join([]string{
-		"search", text, q.Get("category"), q.Get("brand"),
+	// The key hashes the raw parameters: user text joined with any
+	// separator could be forged to collide with another query's key.
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		text, q.Get("category"), q.Get("brand"),
 		q.Get("min_price"), q.Get("max_price"), q.Get("sort"),
 		strconv.Itoa(limit), strconv.Itoa(offset),
-	}, "\x1f")
+	}, "\x1f")))
+	key := "search:" + hex.EncodeToString(sum[:])
 
 	data, err := s.Cache.GetOrFill(r.Context(), key, 30*time.Second,
 		func(ctx context.Context) (any, error) {
@@ -60,8 +66,14 @@ func (s *Server) runSearch(ctx context.Context, q url.Values, text string, limit
 		return "$" + strconv.Itoa(len(args))
 	}
 
+	// Candidate order decides which matches survive the cap. For text
+	// queries that is relevance rank: an id order would keep an arbitrary
+	// lowest-id slice of a broad match and price-sort only that.
+	candOrder := "p.id"
 	if text != "" {
-		where = append(where, "to_tsvector('simple', p.title) @@ websearch_to_tsquery('simple', "+arg(text)+")")
+		ta := arg(text)
+		where = append(where, "to_tsvector('simple', p.title) @@ websearch_to_tsquery('simple', "+ta+")")
+		candOrder = "ts_rank(to_tsvector('simple', p.title), websearch_to_tsquery('simple', " + ta + ")) DESC, p.id"
 	}
 	if c := q.Get("category"); c != "" {
 		where = append(where, "p.category = "+arg(c))
@@ -91,15 +103,15 @@ func (s *Server) runSearch(ctx context.Context, q url.Values, text string, limit
 			SELECT p.id, p.title, p.brand, p.category
 			FROM products p
 			WHERE ` + strings.Join(where, " AND ") + `
-			ORDER BY p.id
+			ORDER BY ` + candOrder + `
 			LIMIT ` + arg(candidateCap) + `
-		)
+		), n AS (SELECT count(*) AS c FROM hits)
 		SELECT h.id, h.title, h.brand, h.category,
 		       min(o.price_cents) FILTER (WHERE o.in_stock) AS best_price,
-		       count(o.*) AS offer_count
-		FROM hits h
+		       count(o.*) AS offer_count, n.c
+		FROM hits h CROSS JOIN n
 		JOIN offers o ON o.product_id = h.id
-		GROUP BY h.id, h.title, h.brand, h.category
+		GROUP BY h.id, h.title, h.brand, h.category, n.c
 		HAVING ` + strings.Join(having, " AND ") + `
 		ORDER BY ` + order + `
 		LIMIT ` + arg(limit) + ` OFFSET ` + arg(offset)
@@ -111,14 +123,21 @@ func (s *Server) runSearch(ctx context.Context, q url.Values, text string, limit
 	defer rows.Close()
 
 	results := []SearchResult{}
+	var hitCount int64
 	for rows.Next() {
 		var sr SearchResult
-		if err := rows.Scan(&sr.ID, &sr.Title, &sr.Brand, &sr.Category, &sr.BestCents, &sr.OfferCount); err != nil {
+		if err := rows.Scan(&sr.ID, &sr.Title, &sr.Brand, &sr.Category, &sr.BestCents, &sr.OfferCount, &hitCount); err != nil {
 			return nil, err
 		}
 		results = append(results, sr)
 	}
-	return map[string]any{"results": results, "limit": limit, "offset": offset, "capped_at": candidateCap}, rows.Err()
+	// truncated says the match set outran the candidate cap, so results
+	// beyond it exist but are not price-sorted in. Only known when the
+	// page is non-empty; capped_at documents the bound either way.
+	return map[string]any{
+		"results": results, "limit": limit, "offset": offset,
+		"capped_at": candidateCap, "truncated": hitCount == candidateCap,
+	}, rows.Err()
 }
 
 func clamp(s string, def, max int) int {

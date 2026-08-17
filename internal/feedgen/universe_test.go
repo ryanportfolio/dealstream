@@ -1,7 +1,6 @@
 package feedgen
 
 import (
-	"math/rand/v2"
 	"strings"
 	"testing"
 )
@@ -65,9 +64,12 @@ func TestStreamCursorSemantics(t *testing.T) {
 	st := NewStream(u, RetailerCfg{Slug: "testmart", CarryRate: 0.5, PageSizeMax: 100})
 	st.Tick(50)
 
-	all, gone := st.Since(0, 1000)
+	all, hasMore, gone := st.Since(0, 1000)
 	if gone {
 		t.Fatal("fresh cursor reported gone")
+	}
+	if hasMore {
+		t.Fatal("drained stream reported has_more")
 	}
 	if len(all) != 50 {
 		t.Fatalf("want 50 updates, got %d", len(all))
@@ -78,14 +80,19 @@ func TestStreamCursorSemantics(t *testing.T) {
 		}
 	}
 
-	tail, _ := st.Since(45, 1000)
+	tail, _, _ := st.Since(45, 1000)
 	if len(tail) != 5 || tail[0].Seq != 46 {
 		t.Fatalf("since=45 want seqs 46..50, got %d items starting %d", len(tail), tail[0].Seq)
 	}
 
-	page, _ := st.Since(0, 10)
+	page, hasMore, _ := st.Since(0, 10)
 	if len(page) != 10 {
 		t.Fatalf("limit not applied: %d", len(page))
+	}
+	// 40 updates remain past this page; the drained signal must come
+	// from the stream, not from comparing page length to a page size.
+	if !hasMore {
+		t.Fatal("partial page did not report has_more")
 	}
 }
 
@@ -96,14 +103,14 @@ func TestStreamCursorExpiry(t *testing.T) {
 	for range maxBuffered/1000 + 2 {
 		st.Tick(1000)
 	}
-	if _, gone := st.Since(0, 10); !gone {
+	if _, _, gone := st.Since(0, 10); !gone {
 		t.Fatal("expired cursor not reported gone")
 	}
 	seq, buffered, _ := st.Stats()
 	if buffered > maxBuffered {
 		t.Fatalf("buffer exceeded cap: %d", buffered)
 	}
-	if _, gone := st.Since(seq, 10); gone {
+	if _, _, gone := st.Since(seq, 10); gone {
 		t.Fatal("live cursor reported gone")
 	}
 }
@@ -115,10 +122,10 @@ func TestStreamCursorAheadOfHead(t *testing.T) {
 	u := testUniverse()
 	st := NewStream(u, RetailerCfg{Slug: "testmart", CarryRate: 0.5})
 	st.Tick(10)
-	if _, gone := st.Since(121905, 10); !gone {
+	if _, _, gone := st.Since(121905, 10); !gone {
 		t.Fatal("cursor ahead of head not reported gone")
 	}
-	if _, gone := st.Since(10, 10); gone {
+	if _, _, gone := st.Since(10, 10); gone {
 		t.Fatal("head cursor reported gone")
 	}
 }
@@ -126,7 +133,6 @@ func TestStreamCursorAheadOfHead(t *testing.T) {
 func TestMangleSKUNormalizesBack(t *testing.T) {
 	// Every mangled variant must normalize to the same canonical key the
 	// ingester derives, or dedupe cannot work.
-	rng := rand.New(rand.NewPCG(1, 2))
 	norm := func(s string) string {
 		s = strings.ToUpper(strings.TrimSpace(s))
 		return strings.Map(func(r rune) rune {
@@ -138,7 +144,7 @@ func TestMangleSKUNormalizesBack(t *testing.T) {
 	}
 	sku := "DS-00001234"
 	for range 100 {
-		if norm(mangleSKU(sku, rng)) != norm(sku) {
+		if norm(mangleSKU(sku)) != norm(sku) {
 			t.Fatalf("mangled sku does not normalize back")
 		}
 	}

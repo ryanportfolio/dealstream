@@ -39,6 +39,10 @@ type Normalized struct {
 	InStock    bool
 	UpdatedAt  time.Time
 	URL        string
+	// Raw is the original feed payload, set by the caller. Items rejected
+	// after normalization (spikes, unknown product without a title) are
+	// quarantined with it so every quarantine row stays replayable.
+	Raw json.RawMessage
 }
 
 // RejectError carries the quarantine reason for a failed item.

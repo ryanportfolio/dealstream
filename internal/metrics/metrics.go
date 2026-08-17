@@ -73,6 +73,11 @@ var (
 		Name: "dealstream_ch_rows_written_total",
 		Help: "Price events written to ClickHouse.",
 	})
+
+	CHDropped = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "dealstream_ch_rows_dropped_total",
+		Help: "Price events dropped at the writer's buffer cap during a sustained ClickHouse outage.",
+	})
 )
 
 // API side.

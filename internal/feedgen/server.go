@@ -15,13 +15,19 @@ import (
 type Server struct {
 	U       *Universe
 	Streams map[string]*Stream
-	// mess uses its own rng: mess should be random per response, unlike
-	// the product universe, which must be deterministic.
-	rng *rand.Rand
+	// epoch identifies this feed instance. Sequences reset on restart, so
+	// a consumer's cursor number can alias into the new sequence space;
+	// the epoch in every response lets consumers detect the reset even
+	// when their cursor still looks valid.
+	epoch uint64
 }
 
+// Mess randomness (quirks, degraded jitter) uses the top-level
+// math/rand/v2 functions: they are goroutine-safe, and mess should be
+// random per response, unlike the product universe, which must be
+// deterministic.
 func NewServer(u *Universe, streams map[string]*Stream) *Server {
-	return &Server{U: u, Streams: streams, rng: rand.New(rand.NewPCG(rand.Uint64(), rand.Uint64()))}
+	return &Server{U: u, Streams: streams, epoch: uint64(time.Now().UnixNano())}
 }
 
 func (s *Server) Mux() *http.ServeMux {
@@ -50,8 +56,8 @@ func (s *Server) withRetailer(endpoint string, next func(http.ResponseWriter, *h
 			http.Error(w, "service unavailable", http.StatusServiceUnavailable)
 			return
 		case "degraded":
-			time.Sleep(time.Duration(1500+s.rng.IntN(2500)) * time.Millisecond)
-			if s.rng.Float64() < 0.10 {
+			time.Sleep(time.Duration(1500+rand.IntN(2500)) * time.Millisecond)
+			if rand.Float64() < 0.10 {
 				count(http.StatusInternalServerError)
 				http.Error(w, "internal error", http.StatusInternalServerError)
 				return
@@ -66,6 +72,11 @@ func (s *Server) withRetailer(endpoint string, next func(http.ResponseWriter, *h
 // the next index to scan; a missing next_cursor means the sync is done.
 func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, st *Stream) {
 	cursor, _ := strconv.Atoi(r.URL.Query().Get("cursor"))
+	// A negative cursor would index products that do not exist; the
+	// universe hash would happily fabricate them.
+	if cursor < 0 {
+		cursor = 0
+	}
 	limit := pageLimit(r, st.Cfg.PageSizeMax)
 
 	items := make([]map[string]any, 0, limit)
@@ -78,7 +89,7 @@ func (s *Server) handleCatalog(w http.ResponseWriter, r *http.Request, st *Strea
 		items = s.appendItem(items, st, i, cur.PriceCents, cur.InStock, time.Now().UTC())
 	}
 	seq, _, _ := st.Stats()
-	resp := map[string]any{"items": items, "as_of_seq": seq}
+	resp := map[string]any{"items": items, "as_of_seq": seq, "epoch": s.epoch}
 	if i < s.U.Size {
 		resp["next_cursor"] = i
 	}
@@ -92,7 +103,7 @@ func (s *Server) handleOffers(w http.ResponseWriter, r *http.Request, st *Stream
 	since, _ := strconv.ParseUint(r.URL.Query().Get("since"), 10, 64)
 	limit := pageLimit(r, st.Cfg.PageSizeMax)
 
-	updates, gone := st.Since(since, limit)
+	updates, hasMore, gone := st.Since(since, limit)
 	if gone {
 		http.Error(w, "cursor expired, full resync required", http.StatusGone)
 		return
@@ -103,7 +114,7 @@ func (s *Server) handleOffers(w http.ResponseWriter, r *http.Request, st *Stream
 		items = s.appendItem(items, st, u.Product, u.PriceCents, u.InStock, u.At)
 		next = u.Seq
 	}
-	writeJSON(w, map[string]any{"items": items, "next": next})
+	writeJSON(w, map[string]any{"items": items, "next": next, "has_more": hasMore, "epoch": s.epoch})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, _ *http.Request, st *Stream) {
@@ -144,15 +155,15 @@ func (s *Server) appendItem(items []map[string]any, st *Stream, i int, priceCent
 	q := st.Cfg.Quirks
 	p := s.U.Product(i)
 
-	if s.rng.Float64() < q.BadPriceRate {
+	if rand.Float64() < q.BadPriceRate {
 		priceCents *= 100 // upstream unit bug: dollars sent as cents
 	}
 	currency := "USD"
-	if s.rng.Float64() < q.WrongCurrencyRate {
-		currency = []string{"EUR", "GBP", "CAD"}[s.rng.IntN(3)]
+	if rand.Float64() < q.WrongCurrencyRate {
+		currency = []string{"EUR", "GBP", "CAD"}[rand.IntN(3)]
 	}
-	if s.rng.Float64() < q.StaleTimestampRate {
-		at = at.Add(-time.Duration(1+s.rng.IntN(48)) * time.Hour)
+	if rand.Float64() < q.StaleTimestampRate {
+		at = at.Add(-time.Duration(1+rand.IntN(48)) * time.Hour)
 	}
 
 	item := map[string]any{
@@ -167,8 +178,8 @@ func (s *Server) appendItem(items []map[string]any, st *Stream, i int, priceCent
 		"url":        fmt.Sprintf("https://%s.example/p/%s", st.Cfg.Slug, strings.ToLower(p.SKU)),
 	}
 	format := q.PriceFormat
-	if s.rng.Float64() < q.DriftRate {
-		format = []string{"cents", "float", "string"}[s.rng.IntN(3)]
+	if rand.Float64() < q.DriftRate {
+		format = []string{"cents", "float", "string"}[rand.IntN(3)]
 	}
 	switch format {
 	case "float":
@@ -178,17 +189,17 @@ func (s *Server) appendItem(items []map[string]any, st *Stream, i int, priceCent
 	default:
 		item["price_cents"] = priceCents
 	}
-	if s.rng.Float64() < q.MissingFieldRate {
-		delete(item, []string{"title", "currency", "updated_at"}[s.rng.IntN(3)])
+	if rand.Float64() < q.MissingFieldRate {
+		delete(item, []string{"title", "currency", "updated_at"}[rand.IntN(3)])
 	}
 	items = append(items, item)
 
-	if s.rng.Float64() < q.DupeRate {
+	if rand.Float64() < q.DupeRate {
 		dupe := make(map[string]any, len(item))
 		for k, v := range item {
 			dupe[k] = v
 		}
-		dupe["sku"] = mangleSKU(p.SKU, s.rng)
+		dupe["sku"] = mangleSKU(p.SKU)
 		items = append(items, dupe)
 	}
 	return items
@@ -205,8 +216,8 @@ func styleSKU(sku, style string) string {
 	}
 }
 
-func mangleSKU(sku string, rng *rand.Rand) string {
-	switch rng.IntN(3) {
+func mangleSKU(sku string) string {
+	switch rand.IntN(3) {
 	case 0:
 		return strings.ToLower(sku)
 	case 1:

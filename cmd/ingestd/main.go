@@ -48,7 +48,14 @@ func main() {
 		log.Fatal(err)
 	}
 
-	pool, err := pgxpool.New(ctx, config.MustGet("PG_DSN"))
+	// Cap the pool so a stall queues in the app, not inside Postgres:
+	// eight workers run one query at a time each, plus cursor writes.
+	pcfg, err := pgxpool.ParseConfig(config.MustGet("PG_DSN"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	pcfg.MaxConns = 16
+	pool, err := pgxpool.NewWithConfig(ctx, pcfg)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -71,13 +78,17 @@ func main() {
 	ch := ingest.NewCHWriter(chconn)
 	client := ingest.NewClient(*feedBase)
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// The writer outlives the workers on shutdown: workers stop producing
+	// first, then the writer's context is cancelled, which triggers its
+	// final drain of whatever is still buffered.
+	chCtx, chStop := context.WithCancel(context.Background())
+	chDone := make(chan struct{})
 	go func() {
-		defer wg.Done()
-		ch.Run(ctx)
+		defer close(chDone)
+		ch.Run(chCtx)
 	}()
 
+	var wg sync.WaitGroup
 	for _, r := range cfg.Retailers {
 		id, err := store.EnsureRetailer(ctx, r.Slug, r.Name)
 		if err != nil {
@@ -98,5 +109,7 @@ func main() {
 	log.Printf("ingestd: %d retailers, feed %s", len(cfg.Retailers), *feedBase)
 	<-ctx.Done()
 	wg.Wait()
+	chStop()
+	<-chDone
 	log.Printf("ingestd: drained, %d events unflushed", ch.Pending())
 }

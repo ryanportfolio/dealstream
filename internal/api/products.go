@@ -2,9 +2,12 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 type Offer struct {
@@ -59,8 +62,14 @@ func (s *Server) loadProduct(ctx context.Context, id int64) (*Product, error) {
 	err := s.PG.QueryRow(ctx,
 		`SELECT id, sku_norm, title, brand, category, attrs FROM products WHERE id = $1`, id).
 		Scan(&p.ID, &p.SKU, &p.Title, &p.Brand, &p.Category, &p.Attrs)
-	if err != nil {
+	// Only a missing row is a 404. Any other failure (database down,
+	// timeout) must surface as a 500, or an outage masquerades as an
+	// empty catalog.
+	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
 	}
 
 	rows, err := s.PG.Query(ctx, `

@@ -20,12 +20,46 @@ import (
 type Store struct {
 	pool *pgxpool.Pool
 
-	mu  sync.Mutex
-	ids map[string]int64
+	mu     sync.Mutex
+	ids    map[string]int64
+	spikes map[spikeKey]int
 }
 
 func NewStore(pool *pgxpool.Pool) *Store {
-	return &Store{pool: pool, ids: make(map[string]int64)}
+	return &Store{pool: pool, ids: make(map[string]int64), spikes: make(map[spikeKey]int)}
+}
+
+// spikeAcceptAfter: a corrupt first observation would otherwise wedge the
+// offer forever, because every correction is 20× away from the held junk
+// and gets rejected. After this many consecutive spike rejections the new
+// price is accepted: a real feed bug is a blip, a persistent "spike" is
+// the truth. The streak lives in memory; a restart just asks the feed for
+// a few more confirmations.
+const spikeAcceptAfter = 3
+
+type spikeKey struct {
+	retailer int16
+	product  int64
+}
+
+// noteSpike records one spike rejection and reports whether the streak
+// has run long enough to accept the new price instead.
+func (s *Store) noteSpike(rid int16, pid int64) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := spikeKey{rid, pid}
+	s.spikes[k]++
+	if s.spikes[k] >= spikeAcceptAfter {
+		delete(s.spikes, k)
+		return true
+	}
+	return false
+}
+
+func (s *Store) clearSpike(rid int16, pid int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.spikes, spikeKey{rid, pid})
 }
 
 func (s *Store) EnsureRetailer(ctx context.Context, slug, name string) (int16, error) {
@@ -49,11 +83,14 @@ type UpsertResult struct {
 	// Spikes are items rejected by the relative price check, with the
 	// held price for the quarantine record.
 	Spikes []SpikeReject
+	// SpikeOverrides counts prices accepted because they persisted
+	// through spikeAcceptAfter consecutive spike rejections.
+	SpikeOverrides int
 	// StaleSkipped counts rows dropped by the updated_at guard.
 	StaleSkipped int
-	// NoTitle counts items for unknown products that carried no title, so
-	// no product row could be created.
-	NoTitle int
+	// NoTitle holds items for unknown products that carried no title, so
+	// no product row could be created; the caller quarantines them.
+	NoTitle []Normalized
 }
 
 type SpikeReject struct {
@@ -78,11 +115,10 @@ func (s *Store) UpsertBatch(ctx context.Context, retailerID int16, items []Norma
 		}
 	}
 
-	ids, noTitle, err := s.resolveProducts(ctx, bySKU)
+	ids, err := s.resolveProducts(ctx, bySKU)
 	if err != nil {
 		return res, err
 	}
-	res.NoTitle = noTitle
 
 	held, err := s.heldPrices(ctx, retailerID, ids)
 	if err != nil {
@@ -97,11 +133,18 @@ func (s *Store) UpsertBatch(ctx context.Context, retailerID int16, items []Norma
 	for sku, it := range bySKU {
 		pid, ok := ids[sku]
 		if !ok {
+			// Unknown product and no title to create one from.
+			res.NoTitle = append(res.NoTitle, it)
 			continue
 		}
 		if h, ok := held[pid]; ok && SpikeSuspect(h, it.PriceCents) {
-			res.Spikes = append(res.Spikes, SpikeReject{Item: it, HeldCents: h})
-			continue
+			if !s.noteSpike(retailerID, pid) {
+				res.Spikes = append(res.Spikes, SpikeReject{Item: it, HeldCents: h})
+				continue
+			}
+			res.SpikeOverrides++
+		} else {
+			s.clearSpike(retailerID, pid)
 		}
 		accepted = append(accepted, offerRow{pid, it})
 	}
@@ -156,9 +199,9 @@ func (s *Store) UpsertBatch(ctx context.Context, retailerID int16, items []Norma
 }
 
 // resolveProducts maps sku_norm to product id, inserting products that do
-// not exist yet. Items for unknown products with no title are dropped and
-// counted: there is nothing to create a product from.
-func (s *Store) resolveProducts(ctx context.Context, bySKU map[string]Normalized) (map[string]int64, int, error) {
+// not exist yet. A sku left unmapped afterward is an unknown product whose
+// item carried no title: there was nothing to create a product from.
+func (s *Store) resolveProducts(ctx context.Context, bySKU map[string]Normalized) (map[string]int64, error) {
 	out := make(map[string]int64, len(bySKU))
 
 	s.mu.Lock()
@@ -172,7 +215,7 @@ func (s *Store) resolveProducts(ctx context.Context, bySKU map[string]Normalized
 	}
 	s.mu.Unlock()
 	if len(misses) == 0 {
-		return out, 0, nil
+		return out, nil
 	}
 	sort.Strings(misses) // deterministic insert order across workers
 
@@ -198,13 +241,13 @@ func (s *Store) resolveProducts(ctx context.Context, bySKU map[string]Normalized
 			ON CONFLICT (sku_norm) DO NOTHING`,
 			skus, titles, brands, cats, attrs)
 		if err != nil {
-			return nil, 0, fmt.Errorf("insert products: %w", err)
+			return nil, fmt.Errorf("insert products: %w", err)
 		}
 	}
 
 	rows, err := s.pool.Query(ctx, `SELECT sku_norm, id FROM products WHERE sku_norm = ANY($1)`, misses)
 	if err != nil {
-		return nil, 0, err
+		return nil, err
 	}
 	defer rows.Close()
 	s.mu.Lock()
@@ -213,23 +256,16 @@ func (s *Store) resolveProducts(ctx context.Context, bySKU map[string]Normalized
 		var id int64
 		if err := rows.Scan(&sku, &id); err != nil {
 			s.mu.Unlock()
-			return nil, 0, err
+			return nil, err
 		}
 		s.ids[sku] = id
 		out[sku] = id
 	}
 	s.mu.Unlock()
 	if err := rows.Err(); err != nil {
-		return nil, 0, err
+		return nil, err
 	}
-
-	noTitle := 0
-	for _, sku := range misses {
-		if _, ok := out[sku]; !ok {
-			noTitle++
-		}
-	}
-	return out, noTitle, nil
+	return out, nil
 }
 
 func (s *Store) heldPrices(ctx context.Context, retailerID int16, ids map[string]int64) (map[int64]int64, error) {

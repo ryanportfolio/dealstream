@@ -30,6 +30,12 @@ type Page struct {
 	NextCursor *int              `json:"next_cursor"`
 	Next       uint64            `json:"next"`
 	AsOfSeq    uint64            `json:"as_of_seq"`
+	// HasMore is the feed's own signal that updates remain past this
+	// page; guessing from page size breaks when the server clamps limits.
+	HasMore bool `json:"has_more"`
+	// Epoch identifies the feed instance; it changes when the feed
+	// restarts and its sequence space resets.
+	Epoch uint64 `json:"epoch"`
 }
 
 func (c *Client) Catalog(ctx context.Context, slug string, cursor, limit int) (Page, error) {
